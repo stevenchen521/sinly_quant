@@ -1,0 +1,63 @@
+[project]
+name = "sinly_quant"
+version = "0.1.0"
+description = "Quant"
+readme = "README.md"
+authors = [
+  {name = "quant", email = "stevenchen521@gmail.com"}
+]
+maintainers = [
+  {name = "quant", email = "stevenchen521@gmail.com"}
+]
+classifiers = [
+    # TODO
+]
+license = {text = "MIT"}
+dependencies = [
+    "typer",
+    "nautilus_trader>=1.221.0,<1.222.0",
+    "pandas>=2.0.0,<3.0.0",
+    "ipykernel>=7.1.0",
+    "pandas-stubs~=2.3.3",
+    "pydantic"
+]
+requires-python = ">=3.13, <3.14"
+#uv sync --all-extras
+[project.optional-dependencies]
+test = [
+    "coverage",  # testing
+    "pytest",  # testing
+    "ruff",  # linting
+    "ty", # checking types
+    "ipdb", # debugging
+    "pytest-mock", #
+]
+
+[project.urls]
+bugs = "https://github.com/stevenchen521/sinly_quant/issues"
+changelog = "https://github.com/stevenchen521/sinly_quant/blob/master/changelog.md"
+homepage = "https://github.com/stevenchen521/sinly_quant"
+
+[project.scripts]
+sinly_quant = "sinly_quant.cli:app"
+
+[tool.ty]
+# All rules are enabled as "error" by default; no need to specify unless overriding.
+# Example override: relax a rule for the entire project (uncomment if needed).
+# rules.TY015 = "warn"  # For invalid-argument-type, warn instead of error.
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+
+[tool.uv]
+package = true

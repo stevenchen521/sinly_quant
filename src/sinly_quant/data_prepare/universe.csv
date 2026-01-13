@@ -1,0 +1,8 @@
+symbol,venue,interval,provider
+VTI,ABC,1-WEEK,tradingview
+GLD,ABC,1-WEEK,tradingview
+VTI,ABC,1-DAY,tradingview
+GLD,ABC,1-DAY,tradingview
+VTI-GLD,ABC,1-DAY,tradingview
+VTI-GLD,ABC,1-WEEK,tradingview
+
