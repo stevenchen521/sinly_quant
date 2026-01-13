@@ -52,7 +52,7 @@ class PairRatioStrategy(Strategy):
         self.subscribe_bars(self.bar_b_l)
         self.subscribe_bars(self.bar_ratio_l)
 
-        # self.register_indicator_for_bars(self.bar_ratio_s, self.swing_levels_s)
+        self.register_indicator_for_bars(self.bar_ratio_s, self.swing_levels_s)
         self.register_indicator_for_bars(self.bar_ratio_l, self.swing_levels_l)
 
         self.log.info(f"Subscribed to {self.bar_a_s}, {self.bar_b_s}, {self.bar_ratio_s}")
@@ -117,14 +117,31 @@ class PairRatioStrategy(Strategy):
                 self.df_history = pd.concat([self.df_history, new_row])
 
         # Order logic:
-        #   If swing_low is not empty:
-        #       if previous one is swing_high
-        #           if asset B position exists:
-        #               close asset B and buy asset A
-        #       else if previous one is swing_low:
-        #           if daily swing_low is lower than previous swing_low:
-        #               if asset A position exists:
-        #                   close asset A and buy asset B
+        #   If latest_swing_l_low:
+        #       if pre_swing_l_high:
+        #           if asset B position exists with proper portation:
+        #               close asset B and buy asset A with proper portation
+        #           else:
+        #               buy asset A with proper portation
+        #   elif latest_swing_l_high:
+        #       if pre_swing_l_low:
+        #           if asset A position exists with proper portation:
+        #               close asset A and buy asset B with proper portation
+        #           else:
+        #               buy asset B with proper portation
+        #
+        #
+        #   if pre_swing_l_low and self.cache_ratio_s["l"] < pre_swing_l_low:
+        #       if asset A position exists:
+        #           close asset A and buy asset B with proper portation
+        #       else:
+        #           buy asset B with proper portation
+        #   elif pre_swing_l_high and self.cache_ratio_s["h"] > pre_swing_l_high:
+        #       if asset B position exists:
+        #           close asset B and buy asset A with proper portation
+        #       else:
+        #           buy asset A with proper portation
+        #
 
         if bar.bar_type == self.bar_ratio_l and not self.df_history.empty:
             # Get the latest row from your dataframe
@@ -133,30 +150,149 @@ class PairRatioStrategy(Strategy):
             # access position: self.cache.positions(instrument_id=self.bar_a_s.instrument_id)
 
             ratio_close = latest_row['bar_ratio_s_c']
-            swing_high = latest_row['swing_s_high']
-            swing_low = latest_row['swing_s_low']
+            swing_s_high = latest_row['swing_s_high']
+            swing_s_low = latest_row['swing_s_low']
 
-            # Ensure indicator values are valid numbers before comparing (SwingLevels might be None initially)
-            if swing_high and ratio_close > swing_high:
-                self.log.info(f"Signal: Ratio Breakout UP. {ratio_close} > {swing_high}")
-                # Example: Long Asset A
-                self._entry_logic(self.bar_a_s.instrument_id, OrderSide.BUY)
+            latest_swing_l_high = latest_row['swing_l_high']
+            latest_swing_l_low = latest_row['swing_l_low']
 
-            elif swing_low and ratio_close < swing_low:
-                self.log.info(f"Signal: Ratio Breakout DOWN. {ratio_close} < {swing_low}")
-                # Example: Short Asset A (or Buy Asset B depending on strategy)
-                self._entry_logic(self.bar_a_s.instrument_id, OrderSide.SELL)
+            swing_l_history = self.df_history[['swing_l_high', 'swing_l_low']].dropna(how='all')
 
-    def _entry_logic(self, instrument_id, side):
-        # Helper to place orders (simplified)
-        if self.portfolio.is_flat(instrument_id):
-            order = self.order_factory.market(
-                instrument_id=instrument_id,
-                order_side=side,
-                quantity=10,
-                time_in_force=TimeInForce.GTC,
-            )
-            self.submit_order(order)
+            if ts in swing_l_history.index:
+                swing_l_history = swing_l_history.drop(ts)
+
+            inst_a = self.bar_a_s.instrument_id
+            inst_b = self.bar_b_s.instrument_id
+
+            # get the current quantities held
+            qty_a = 0.0
+            if not self.portfolio.is_flat(inst_a):
+                qty_a = self.portfolio.position(inst_a).quantity.as_double()
+            qty_b = 0.0
+            if not self.portfolio.is_flat(inst_b):
+                qty_b = self.portfolio.position(inst_b).quantity.as_double()
+
+            # get the current close prices
+            price_a = self.cache_a_s['c']
+            price_b = self.cache_b_s['c']
+
+            # Calculate Total Equity (Cash + Market Value of A + Market Value of B)
+            # Assuming Spot account logic: Cash implies uninvested funds
+            cash = self.portfolio.account.balance_total().as_double()
+
+            val_a = qty_a * price_a
+            val_b = qty_b * price_b
+            total_equity = cash + val_a + val_b
+
+            if total_equity <= 0:
+                return
+
+            pre_swing_l_row = swing_l_history.iloc[-1]
+            pre_swing_l_high = pre_swing_l_row['swing_l_high'] if pd.notna(pre_swing_l_row['swing_l_high']) else None
+            pre_swing_l_low = pre_swing_l_row['swing_l_low'] if pd.notna(pre_swing_l_row['swing_l_low']) else None
+
+            if latest_swing_l_low and not swing_l_history.empty:
+                if pre_swing_l_high:
+                    self._normal_rebalance(
+                        higher_inst_id=inst_a,
+                        lower_inst_id=inst_b,
+                        total_equity=total_equity,
+                        ratio_h=0.80,
+                        ratio_threshold=0.02,
+                        cur_price_lower=price_b,
+                        cur_price_higher=price_a,
+                        qty_higher=qty_a,
+                        qty_lower=qty_b
+                    )
+                elif pre_swing_l_low:
+                    self.log.info(f"Signal: Long Swing Low Breakout detected.")
+            elif latest_swing_l_high and not swing_l_history.empty:
+                if pre_swing_l_low:
+                    self._normal_rebalance(
+                        higher_inst_id=inst_b,
+                        lower_inst_id=inst_a,
+                        total_equity=total_equity,
+                        ratio_h=0.80,
+                        ratio_threshold=0.02,
+                        cur_price_lower=price_a,
+                        cur_price_higher=price_b,
+                        qty_higher=qty_b,
+                        qty_lower=qty_a
+                    )
+                elif pre_swing_l_high:
+                    self.log.info(f"Signal: Long Swing High Breakout detected.")
+
+
+    def _normal_rebalance(self,
+                          higher_inst_id,
+                          lower_inst_id,
+                          total_equity,
+                          ratio_h,
+                          ratio_threshold,
+                          cur_price_lower,
+                          cur_price_higher,
+                          qty_higher,
+                          qty_lower
+                          ):
+        ratio_l = 1-ratio_h
+
+        # Calculate Targets
+        target_val_a = total_equity * ratio_h
+        target_val_b = total_equity * ratio_l
+        # Calculate Quantity Deltas
+        # We need to reach target_val_b, so we sell the difference
+        target_qty_b = target_val_b / cur_price_lower
+        qty_to_sell_b = qty_lower - target_qty_b
+        # We need to reach target_val_a, so we buy the difference
+        target_qty_a = target_val_a / cur_price_higher
+        qty_to_buy_a = target_qty_a - qty_higher
+
+        val_b = qty_lower * cur_price_lower
+
+
+        # Check Ratio of Asset B
+        ratio_b = val_b / total_equity
+
+        # Rebalance Logic: If B is around ratio_h (using > 0.78 as threshold)
+        if ratio_b > (ratio_h - ratio_threshold):
+            self.log.info(
+                f"Rebalance Trigger: Asset B is {ratio_b:.2%} of portfolio. Flipping to A={ratio_h}, B={ratio_l}")
+            # Execute Orders
+            # Sell B first to free up cash (if spot)
+            if qty_to_sell_b > 0:
+                limit_price_b = self.cache_b_l['o']  # Use long bar open price as limit
+                self.submit_order(self.order_factory.limit(
+                    instrument_id=lower_inst_id,
+                    order_side=OrderSide.SELL,
+                    quantity=qty_to_sell_b,
+                    price=limit_price_b,
+                    time_in_force=TimeInForce.GTC
+                ))
+
+            # Buy A
+            if qty_to_buy_a > 0:
+                limit_price_a = self.cache_a_l['o']  # Use long bar open price as limit
+                self.submit_order(self.order_factory.limit(
+                    instrument_id=higher_inst_id,
+                    order_side=OrderSide.BUY,
+                    quantity=qty_to_buy_a,
+                    price=limit_price_a,
+                    time_in_force=TimeInForce.GTC
+                ))
+        else:
+            self.log.info(
+                f"No Rebalance: Asset B is {ratio_b:.2%} of portfolio. No action taken.")
+            # Buy A
+            if qty_to_buy_a > 0:
+                limit_price_a = self.cache_a_l['o']  # Use long bar open price as limit
+                self.submit_order(self.order_factory.limit(
+                    instrument_id=lower_inst_id,
+                    order_side=OrderSide.BUY,
+                    quantity=qty_to_buy_a,
+                    price=limit_price_a,
+                    time_in_force=TimeInForce.GTC
+                ))
+
 
     def on_stop(self):
         # Use self.log instead of print to ensure it appears in the engine's output
