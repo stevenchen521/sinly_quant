@@ -1,14 +1,14 @@
 import pandas as pd
 
-from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import TimeInForce, OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 
 
 from sinly_quant.my_indicators.swing_levels import SwingLevels
+from sinly_quant.strategies.base_strategy import BaseSinlyStrategy
 
-class PairRatioStrategy(Strategy):
+class PairRatioStrategy(BaseSinlyStrategy):
     def __init__(self,
                  bar_a_s: BarType,
                  bar_a_l: BarType,
@@ -166,30 +166,13 @@ class PairRatioStrategy(Strategy):
         price_a = self.cache_a_s['c']
         price_b = self.cache_b_s['c']
 
-        # Calculate Total Equity (Cash + Market Value of A + Market Value of B)
-        # Assuming Spot account logic: Cash implies uninvested funds
-        # 1. Determine the currency (assuming the quote currency of Asset A is your cash currency, e.g., USD)
-        instrument_a = self.instrument(inst_a)
-        currency = instrument_a.quote_currency
-
-        # 2. Retrieve the Account object from cache safely
-        # We take the first available account. This works for standard single-account strategies.
-        # We use an iterator to avoid index errors if the list structure differs.
-        account = next(iter(self.cache.accounts()))
-        from nautilus_trader.model.identifiers import Venue
-        acc = self.cache.account(venue=Venue("ABC"))
-
-        # 3. Get the total balance (Free + Locked) for that specific currency
-        cash = account.balance_total(currency).as_double()
-
-
-
+        # get the current cash balance in quote currency
+        cash = self.get_quote_balance(inst_a)
 
 
         val_a = qty_a * price_a
         val_b = qty_b * price_b
         total_equity = cash + val_a + val_b
-
 
         # get the previous swing long high and low
         pre_swing_l_low = None
