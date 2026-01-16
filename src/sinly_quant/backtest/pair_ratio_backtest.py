@@ -85,7 +85,7 @@ def run_backtest():
         venue=Venue(venue_name_abc),
         oms_type=OmsType.NETTING,
         account_type=AccountType.MARGIN,
-        starting_balances=[Money(1_000_000, USD)],
+        starting_balances=[Money(10_000, USD)],
         base_currency=USD,
         default_leverage=Decimal(1),
     )

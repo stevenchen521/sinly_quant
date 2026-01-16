@@ -27,5 +27,6 @@ class BaseSinlyStrategy(Strategy):
             return 0.0
 
         # 3. Return total balance
-        return account.balance_total(currency).as_double()
+        return account.balance_free(currency).as_double()
+        # return account.balance_total(currency).as_double()
 
