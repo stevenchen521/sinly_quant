@@ -51,7 +51,7 @@ def run_backtest():
         data_cls=Bar,
         identifiers=[f"{symbol_name_vti_gld}.{venue_name_abc}"],
         start="2008-01-01T00:00:00Z",
-        end="2024-12-31T00:00:00Z",
+        end="2025-12-31T00:00:00Z",
     )
 
     # Filter bars by timeframe
@@ -84,7 +84,7 @@ def run_backtest():
     engine.add_venue(
         venue=Venue(venue_name_abc),
         oms_type=OmsType.NETTING,
-        account_type=AccountType.MARGIN,
+        account_type=AccountType.CASH,
         starting_balances=[Money(10_000, USD)],
         base_currency=USD,
         default_leverage=Decimal(1),
@@ -108,7 +108,7 @@ def run_backtest():
         bar_ratio_s=bars_vti_gld_daily[0].bar_type,
         bar_ratio_l=bars_vti_gld_weekly[0].bar_type,
         swing_size_r=3,
-        swing_size_l=15
+        swing_size_l=12
     )
     engine.add_strategy(strategy)
 

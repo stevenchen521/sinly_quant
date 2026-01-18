@@ -1,5 +1,4 @@
 import pandas as pd
-from nautilus_trader.core.nautilus_pyo3 import OrderDenied
 
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import TimeInForce, OrderSide
@@ -50,6 +49,11 @@ class PairRatioStrategy(BaseSinlyStrategy):
         # self.ratio_ema = MovingAverageFactory.create(20, MovingAverageType.EXPONENTIAL)
         self.swing_levels_s = SwingLevels(swing_size_r, swing_size_l)
         self.swing_levels_l = SwingLevels(swing_size_r, swing_size_l)
+
+        # NEW: Store pending buy orders here
+        self.pending_buy_instruction = None
+
+        self.venue = bar_a_s.instrument_id.venue
 
     def on_start(self):
         # 1. Subscribe to all data streams
@@ -132,7 +136,6 @@ class PairRatioStrategy(BaseSinlyStrategy):
                 l_index = last_l_index + 1
             else:
                 l_index = last_l_index
-        # debug: pd.Timestamp(bar.ts_event, unit='ns').strftime('%Y-%m-%d') == '2008-05-19' and str(bar.bar_type) == 'VTI-GLD.ABC-1-WEEK-LAST-EXTERNAL'
         data = {
             "l_index": l_index,
 
@@ -195,23 +198,21 @@ class PairRatioStrategy(BaseSinlyStrategy):
         # First, let's calculate the equity values of the portfolio
         inst_a = self.bar_a_s.instrument_id
         inst_b = self.bar_b_s.instrument_id
+        # debug: pd.Timestamp(bar.ts_event, unit='ns').strftime('%Y-%m-%d') == '2008-05-19' and str(bar.bar_type) == 'VTI-GLD.ABC-1-WEEK-LAST-EXTERNAL'
 
         # get the current quantities held
-        qty_a = 0.0
-        if not self.portfolio.is_flat(inst_a):
-            qty_a = self.cache.positions(instrument_id=inst_a)[0].quantity.as_double()
-            qty_a = int(qty_a)
-        qty_b = 0.0
-        if not self.portfolio.is_flat(inst_b):
-            qty_b = self.cache.positions(instrument_id=inst_b)[0].quantity.as_double()
-            qty_b = int(qty_b)
+        qty_a = self.get_quote_qty(inst_a)
+        qty_b = self.get_quote_qty(inst_b)
 
         # get the current close prices
         price_a = self.cache_a_s['c']
         price_b = self.cache_b_s['c']
 
+        if price_a is None or price_b is None:
+            return
+
         # get the current cash balance in quote currency
-        cash = self.get_quote_balance(inst_a)
+        cash = self.get_available_cash(inst_a.venue)
 
 
         val_a = 0.0
@@ -248,29 +249,21 @@ class PairRatioStrategy(BaseSinlyStrategy):
             if pd.isna(latest_swing_l_low) and pd.isna(latest_swing_l_high):
                 return
 
-            if not pd.isna(latest_swing_l_low):
+            if pd.notna(latest_swing_l_low):
                 self._normal_rebalance(
-                    inst_id_buy=inst_a,
-                    inst_id_sell=inst_b,
+                    asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
+                    asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold,
-                    cur_price_sell=price_b,
-                    cur_price_buy=price_a,
-                    qty_buy=qty_a,
-                    qty_sell=qty_b
+                    ratio_threshold=self.thresh_hold
                 )
-            elif not pd.isna(latest_swing_l_high):
+            elif pd.notna(latest_swing_l_high):
                 self._normal_rebalance(
-                    inst_id_buy=inst_b,
-                    inst_id_sell=inst_a,
+                    asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
+                    asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold,
-                    cur_price_sell=price_a,
-                    cur_price_buy=price_b,
-                    qty_buy=qty_b,
-                    qty_sell=qty_a
+                    ratio_threshold=self.thresh_hold
                 )
             return
 
@@ -285,34 +278,26 @@ class PairRatioStrategy(BaseSinlyStrategy):
             bar_ratio_s_h = latest_row['bar_ratio_s_h']
             bar_ratio_s_l = latest_row['bar_ratio_s_l']
 
-            if pre_swing_l_low and bar_ratio_s_l < pre_swing_l_low:
+            if pd.notna(pre_swing_l_low) and bar_ratio_s_l < pre_swing_l_low:
                 self.log.info(f"Signal: Short Swing Low Breakout detected.")
             # So, we need to sell asset A and buy asset B
                 self._normal_rebalance(
-                    inst_id_buy=inst_b,
-                    inst_id_sell=inst_a,
+                    asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
+                    asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold,
-                    cur_price_buy=price_b,
-                    cur_price_sell=price_a,
-                    qty_buy=qty_b,
-                    qty_sell=qty_a
+                    ratio_threshold=self.thresh_hold
                 )
 
-            elif pre_swing_l_high and bar_ratio_s_h > pre_swing_l_high:
+            elif pd.notna(pre_swing_l_high) and bar_ratio_s_h > pre_swing_l_high:
                 self.log.info(f"Signal: Short Swing High Breakout detected.")
             # So, we need to sell asset B and buy asset A
                 self._normal_rebalance(
-                    inst_id_buy=inst_a,
-                    inst_id_sell=inst_b,
+                    asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
+                    asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold,
-                    cur_price_sell=price_b,
-                    cur_price_buy=price_a,
-                    qty_buy=qty_a,
-                    qty_sell=qty_b
+                    ratio_threshold=self.thresh_hold
                 )
 
         if bar.bar_type == self.bar_ratio_l and not self.df_history.empty:
@@ -323,48 +308,56 @@ class PairRatioStrategy(BaseSinlyStrategy):
             if pd.isna(latest_swing_l_low) and pd.isna(latest_swing_l_high):
                 return
 
-            if latest_swing_l_low and not swing_l_history.empty:
-                if pre_swing_l_high:
+            if pd.notna(latest_swing_l_low) and not swing_l_history.empty:
+                if pd.notna(pre_swing_l_high):
                     self._normal_rebalance(
-                        inst_id_buy=inst_a,
-                        inst_id_sell=inst_b,
+                        asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
+                        asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
                         total_position=total_position,
                         ratio_h=self.ratio_h,
-                        ratio_threshold=self.thresh_hold,
-                        cur_price_sell=price_b,
-                        cur_price_buy=price_a,
-                        qty_buy=qty_a,
-                        qty_sell=qty_b
+                        ratio_threshold=self.thresh_hold
                     )
                 elif pre_swing_l_low:
                     self.log.info(f"Signal: Long Swing Low Breakout detected.")
-            elif latest_swing_l_high and not swing_l_history.empty:
-                if pre_swing_l_low:
+            elif pd.notna(latest_swing_l_high) and not swing_l_history.empty:
+                if pd.notna(pre_swing_l_low):
                     self._normal_rebalance(
-                        inst_id_buy=inst_b,
-                        inst_id_sell=inst_a,
+                        asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
+                        asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
                         total_position=total_position,
                         ratio_h=self.ratio_h,
-                        ratio_threshold=self.thresh_hold,
-                        cur_price_sell=price_a,
-                        cur_price_buy=price_b,
-                        qty_buy=qty_b,
-                        qty_sell=qty_a
+                        ratio_threshold=self.thresh_hold
                     )
                 elif pre_swing_l_high:
                     self.log.info(f"Signal: Long Swing High Breakout detected.")
 
     def _normal_rebalance(self,
-                          inst_id_buy: InstrumentId,
-                          inst_id_sell: InstrumentId,
+                          asset_h: dict,
+                          asset_l: dict,
                           total_position: float,
                           ratio_h: float,
                           ratio_threshold: float,
-                          cur_price_buy: float,
-                          cur_price_sell: float,
-                          qty_buy: float,
-                          qty_sell: float
                           ) -> None:
+        """
+        Rebalances the pair to match the target ratio.
+
+        Args:
+            asset_h (dict): Group for the asset we want to overweight (Target High Ratio).
+                            Expected keys: 'id' (InstrumentId), 'price' (float), 'qty' (float).
+            asset_l (dict): Group for the asset we want to underweight (Target Low Ratio).
+                            Expected keys: 'id' (InstrumentId), 'price' (float), 'qty' (float).
+            total_position (float): Total equity value (cash + positions).
+            ratio_h (float): Target allocation ratio for asset_h (e.g. 0.8).
+            ratio_threshold (float): Minimum deviation required to trigger rebalance.
+        """
+        # Unpack
+        inst_id_buy = asset_h['id']
+        cur_price_buy = asset_h['price']
+        qty_buy = asset_h['qty']
+
+        inst_id_sell = asset_l['id']
+        cur_price_sell = asset_l['price']
+        qty_sell = asset_l['qty']
 
         ratio_l = 1.0 - ratio_h
 
@@ -391,11 +384,15 @@ class PairRatioStrategy(BaseSinlyStrategy):
         else:
             self.log.info(f"Rebalance Trigger (Adjust): Asset {inst_id_sell} is {ratio_low:.2%}. Adjusting to targets.")
 
-        # 4. Execute Orders (Sells First to free cash)
+        # 4. Execute Orders with Chain Logic
+        sold_something = False
         limit_price_b = format(cur_price_sell, '.4f')
+        limit_price_a = format(cur_price_buy, '.4f')
+
+        # --- EXECUTE SELLS (Immediate) ---
+        # Check if we need to Sell B (the low ratio asset)
         if qty_to_sell_l > 0:
-            # Use long bar open price from cache as limit, or cur_price_lower as fallback
-            # limit_price_b = self.cache_b_l.get('o') or cur_price_sell
+            sold_something = True
             self.submit_order(self.order_factory.limit(
                 instrument_id=inst_id_sell,
                 order_side=OrderSide.SELL,
@@ -404,29 +401,11 @@ class PairRatioStrategy(BaseSinlyStrategy):
                 time_in_force=TimeInForce.GTC,
                 reduce_only=True,
             ))
-        elif qty_to_sell_l < 0: # this only happens when initial position is zero
-            self.log.warning(f"Calculated qty_to_sell_l <= 0: {qty_to_sell_l}. No SELL order submitted. Submit BUY only.")
-            self.submit_order(self.order_factory.limit(
-                instrument_id=inst_id_sell,
-                order_side=OrderSide.BUY,
-                quantity=Quantity.from_int(abs(qty_to_sell_l)),
-                price=Price.from_str(str(limit_price_b)),
-                time_in_force=TimeInForce.GTC
-            ))
 
-        limit_price_a = format(cur_price_buy, '.4f')
-        if qty_to_buy_h > 0:
-            # Use long bar open price from cache as limit, or cur_price_higher as fallback
-            # limit_price_a = self.cache_a_l.get('o') or cur_price_buy
-            self.submit_order(self.order_factory.limit(
-                instrument_id=inst_id_buy,
-                order_side=OrderSide.BUY,
-                quantity=Quantity.from_int(abs(qty_to_buy_h)),
-                price=Price.from_str(str(limit_price_a)),
-                time_in_force=TimeInForce.GTC
-            ))
-        elif qty_to_buy_h < 0: # this only happens when initial position is zero
-            self.log.warning(f"Calculated qty_to_buy_h <= 0: {qty_to_buy_h}. No BUY order submitted. Submit SELL only.")
+        # Check if we need to Sell A (the high ratio asset)
+        # This occurs if we are heavily overweight A and need to trim it
+        if qty_to_buy_h < 0:
+            sold_something = True
             self.submit_order(self.order_factory.limit(
                 instrument_id=inst_id_buy,
                 order_side=OrderSide.SELL,
@@ -435,6 +414,36 @@ class PairRatioStrategy(BaseSinlyStrategy):
                 time_in_force=TimeInForce.GTC,
                 reduce_only=True,
             ))
+
+        # --- EXECUTE BUYS (Deferred or Immediate) ---
+        def execute_or_defer_buy(inst_id, qty, price_str):
+            if qty <= 0: return
+
+            if sold_something:
+                # Store instruction for on_order_filled
+                self.log.info(f"Deferring BUY {qty} of {inst_id} until SELL fills.")
+                self.pending_buy_instruction = {
+                    'instrument_id': inst_id,
+                    'quantity': qty,
+                    'price': price_str
+                }
+            else:
+                # Immediate execution
+                self.submit_order(self.order_factory.limit(
+                    instrument_id=inst_id,
+                    order_side=OrderSide.BUY,
+                    quantity=Quantity.from_int(qty),
+                    price=Price.from_str(price_str),
+                    time_in_force=TimeInForce.GTC
+                ))
+
+        # Calculate if we need to buy B (rare, usually we sell B here)
+        if qty_to_sell_l < 0:
+            execute_or_defer_buy(inst_id_sell, abs(qty_to_sell_l), limit_price_b)
+
+        # Calculate if we need to buy A (standard rebalance target)
+        if qty_to_buy_h > 0:
+            execute_or_defer_buy(inst_id_buy, abs(qty_to_buy_h), limit_price_a)
 
     def on_stop(self):
         # Use self.log instead of print to ensure it appears in the engine's output
@@ -451,29 +460,75 @@ class PairRatioStrategy(BaseSinlyStrategy):
         else:
             self.log.info("History DataFrame is empty.")
 
+        # Save Fills/Trade History
+        if not self.fills_df.empty:
+            fills_path = "fills_history.csv"
+            self.fills_df.to_csv(fills_path)
+            self.log.info(f"Fills History saved to {fills_path}")
+            self.log.info(f"Fills Info:\n{self.fills_df}")
+        else:
+            self.log.info("No fills recorded.")
+
 
     def on_order_filled(self, event: OrderFilled) -> None:
         """
         Triggered immediately when an order is partially or fully filled.
         """
-        # 1. Log the execution details
-        self.log.info(f"FILLED: {event.instrument_id} {event.order_side} {event.last_qty} @ {event.last_px}")
+        # 1. Record the execution details to internal history
+        self.record_fill(event)
 
-        # 2. Check the specific position for this instrument
-        # This will show you the Net Quantity held after this fill
-        if not self.portfolio.is_flat(event.instrument_id):
-            # position = self.portfolio.position(event.instrument_id)
-            position = self.cache.positions(instrument_id=event.instrument_id)
-            self.log.info(f"Current Position {event.instrument_id}: {position[0].quantity}")
-        else:
-            self.log.info(f"Current Position {event.instrument_id}: FLAT")
+        # 1.5. Enrich the history record with Total Equity (position_all)
+        #      Using cached close prices from the strategy state
+        #      NOTE: These prices are technically from the LAST RECEIVED BAR, not live ticks.
+        #            For daily bars backtest, this is acceptable.
+        if self.fills_history:
+            inst_a = self.bar_a_s.instrument_id
+            inst_b = self.bar_b_s.instrument_id
 
-        # 3. Check Account Equity (Total Balance)
-        # Note: Depending on your account type, this accesses the account attached to the venue
-        account = self.portfolio.account(self.bar_a_s.instrument_id.venue)
-        total_balance = account.balance_total()
-        self.log.info(f"Account Equity: {total_balance}")
+            # Current quantities
+            qty_a = self.get_quote_qty(inst_a)
+            qty_b = self.get_quote_qty(inst_b)
 
+            # Cached Prices
+            px_a = self.cache_a_s['c'] or 0.0
+            px_b = self.cache_b_s['c'] or 0.0
+
+            # If the current fill is for A or B, update the price to reflect the fill price approx?
+            # Or just stick to the bar close? User asked to use daily close info stored.
+            # We'll use the cached daily close logic as requested.
+
+            # Cash (already fetched in record_fill, but let's grab it or reuse)
+            # Accessing the last record created by record_fill
+            last_record = self.fills_history[-1]
+            cash = last_record['available_cash']
+
+            # Calculate Equity
+            val_a = qty_a * px_a
+            val_b = qty_b * px_b
+            position_all = cash + val_a + val_b
+
+            # Update the record
+            self.fills_history[-1]['position_all'] = position_all
+            self.fills_history[-1]['price_a'] = px_a
+            self.fills_history[-1]['price_b'] = px_b
+
+        # 2. Strategy Specific Logic: Chain Execution (Deferred Buy)
+        if self.pending_buy_instruction and event.order_side == OrderSide.SELL:
+            instr = self.pending_buy_instruction
+            # Verify we are not trying to buy what we just sold (unlikely but safe)
+            # and that the sell was actually related to our rebalance logic
+
+            self.log.info(f"SELL confirmed. Executing deferred BUY for {instr['instrument_id']}")
+
+            self.submit_order(self.order_factory.limit(
+                instrument_id=instr['instrument_id'],
+                order_side=OrderSide.BUY,
+                quantity=Quantity.from_int(instr['quantity']),
+                price=Price.from_str(str(instr['price'])),
+                time_in_force=TimeInForce.GTC
+            ))
+
+            self.pending_buy_instruction = None
 
     def on_order_rejected(self, event: OrderRejected) -> None:
         """
@@ -486,4 +541,3 @@ class PairRatioStrategy(BaseSinlyStrategy):
         Catches orders that failed immediately (e.g. Insufficient Funds)
         """
         self.log.error(f"⚠️ ORDER DENIED: {event.instrument_id} - Reason: {event.reason}")
-
