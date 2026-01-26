@@ -10,6 +10,13 @@ def get_absolute_path(file, relative_path):
     return Path(file).parent.joinpath(relative_path).resolve()
 
 
+def get_timestamp_suffix() -> str:
+    """
+    Returns a timestamp string suitable for filenames (YYYYMMDD_HHMMSS).
+    Precision to seconds as requested.
+    """
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
 def unix_to_iso_date(timestamp: int, unit: str = "ns") -> str:
     """Convert Unix timestamp to ISO date string 'YYYY-MM-DD'."""

@@ -78,8 +78,7 @@ class BaseSinlyStrategy(Strategy):
             'fill_value': fill_value,
             'position_qty': current_pos_qty,
             'available_cash': current_cash,
-            'client_order_id': event.client_order_id.value,
-            # 'position_all': None,   # Will be populated by subclass
+            'client_order_id': event.client_order_id.value
         }
         self.fills_history.append(record)
 

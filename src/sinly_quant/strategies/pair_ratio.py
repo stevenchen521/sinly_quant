@@ -2,10 +2,12 @@ import pandas as pd
 
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import TimeInForce, OrderSide
-from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Quantity, Price
 from nautilus_trader.model.events import OrderFilled, OrderRejected, OrderDenied
+from pathlib import Path
 
+from sinly_quant.constants import RESULTS_PATH
+from sinly_quant.util import get_timestamp_suffix
 from sinly_quant.my_indicators.swing_levels import SwingLevels
 from sinly_quant.strategies.base_strategy import BaseSinlyStrategy
 
@@ -20,9 +22,16 @@ class PairRatioStrategy(BaseSinlyStrategy):
                  swing_size_r: int = 3,
                  swing_size_l: int = 15,
                  split_ratio=0.90,
-                 thresh_hold=0.02
+                 thresh_hold=0.02,
+                 output_path: str = None
                  ):
         super().__init__()
+        # Set output path (default to constants.RESULTS_PATH if not provided)
+        self.output_path = Path(output_path) if output_path else RESULTS_PATH
+
+        # Generate a unique run identifier/timestamp for filenames
+        self.run_id = get_timestamp_suffix()
+
         self.bar_a_s = bar_a_s
         self.bar_b_s = bar_b_s
         self.bar_ratio_s = bar_ratio_s
@@ -53,6 +62,12 @@ class PairRatioStrategy(BaseSinlyStrategy):
         # NEW: Store pending buy orders here
         self.pending_buy_instruction = None
 
+        # Log for daily fills aggregation
+        self.daily_fills_log = {}
+
+        # Track last acted breakout to avoid duplicate actions on the same swing level
+        self.last_acted_breakout = None
+
         self.venue = bar_a_s.instrument_id.venue
 
     def on_start(self):
@@ -71,6 +86,33 @@ class PairRatioStrategy(BaseSinlyStrategy):
         self.log.info(f"Subscribed to {self.bar_a_s}, {self.bar_b_s}, {self.bar_ratio_s}, {self.bar_ratio_l}")
 
     def on_bar(self, bar: Bar):
+        # Order logic:
+        #   If latest_swing_l_low:
+        #       if pre_swing_l_high:
+        #           if asset B position exists with proper portation:
+        #               close asset B and buy asset A with proper portation
+        #           else:
+        #               buy asset A with proper portation
+        #   elif latest_swing_l_high:
+        #       if pre_swing_l_low:
+        #           if asset A position exists with proper portation:
+        #               close asset A and buy asset B with proper portation
+        #           else:
+        #               buy asset B with proper portation
+        #
+        #
+        #   if pre_swing_l_low and self.cache_ratio_s["l"] < pre_swing_l_low:
+        #       if asset A position exists:
+        #           close asset A and buy asset B with proper portation
+        #       else:
+        #           buy asset B with proper portation
+        #   elif pre_swing_l_high and self.cache_ratio_s["h"] > pre_swing_l_high:
+        #       if asset B position exists:
+        #           close asset B and buy asset A with proper portation
+        #       else:
+        #           buy asset A with proper portation
+
+
         # Update local state cache for dataframe construction
         ohlc = {
             'o': bar.open.as_double(),
@@ -168,37 +210,11 @@ class PairRatioStrategy(BaseSinlyStrategy):
             else:
                 self.df_history = pd.concat([self.df_history, new_row])
 
-        # Order logic:
-        #   If latest_swing_l_low:
-        #       if pre_swing_l_high:
-        #           if asset B position exists with proper portation:
-        #               close asset B and buy asset A with proper portation
-        #           else:
-        #               buy asset A with proper portation
-        #   elif latest_swing_l_high:
-        #       if pre_swing_l_low:
-        #           if asset A position exists with proper portation:
-        #               close asset A and buy asset B with proper portation
-        #           else:
-        #               buy asset B with proper portation
-        #
-        #
-        #   if pre_swing_l_low and self.cache_ratio_s["l"] < pre_swing_l_low:
-        #       if asset A position exists:
-        #           close asset A and buy asset B with proper portation
-        #       else:
-        #           buy asset B with proper portation
-        #   elif pre_swing_l_high and self.cache_ratio_s["h"] > pre_swing_l_high:
-        #       if asset B position exists:
-        #           close asset B and buy asset A with proper portation
-        #       else:
-        #           buy asset A with proper portation
-        #
-
         # First, let's calculate the equity values of the portfolio
         inst_a = self.bar_a_s.instrument_id
         inst_b = self.bar_b_s.instrument_id
-        # debug: pd.Timestamp(bar.ts_event, unit='ns').strftime('%Y-%m-%d') == '2008-05-19' and str(bar.bar_type) == 'VTI-GLD.ABC-1-WEEK-LAST-EXTERNAL'
+        # debug: pd.Timestamp(bar.ts_event, unit='ns').strftime('%Y-%m-%d') == '2009-03-23' and str(bar.bar_type) == 'VTI-GLD.ABC-1-WEEK-LAST-EXTERNAL'
+        # debug: pd.Timestamp(bar.ts_event, unit='ns').strftime('%Y-%m-%d') == '2009-07-23' and str(bar.bar_type) == 'VTI-GLD.ABC-1-DAY-LAST-EXTERNAL'
 
         # get the current quantities held
         qty_a = self.get_quote_qty(inst_a)
@@ -227,12 +243,14 @@ class PairRatioStrategy(BaseSinlyStrategy):
         # get the previous swing long high and low
         pre_swing_l_low = None
         pre_swing_l_high = None
+        pre_swing_l_ts = None
 
         swing_l_history = self.df_history[['swing_l_high', 'swing_l_low']].dropna(how='all')
         if ts in swing_l_history.index:
             swing_l_history = swing_l_history.drop(ts)
         if not swing_l_history.empty:
             pre_swing_l = swing_l_history.iloc[-1]
+            pre_swing_l_ts = pre_swing_l.name
             pre_swing_l_high = pre_swing_l['swing_l_high'] if pd.notna(pre_swing_l['swing_l_high']) else None
             pre_swing_l_low = pre_swing_l['swing_l_low'] if pd.notna(pre_swing_l['swing_l_low']) else None
             # pre_swing_l_idx = pre_swing_l['l_index'] if pd.notna(pre_swing_l['l_index']) else None
@@ -250,7 +268,7 @@ class PairRatioStrategy(BaseSinlyStrategy):
                 return
 
             if pd.notna(latest_swing_l_low):
-                self._normal_rebalance(
+                self._calc_submit_orders(
                     asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     total_position=total_position,
@@ -258,7 +276,7 @@ class PairRatioStrategy(BaseSinlyStrategy):
                     ratio_threshold=self.thresh_hold
                 )
             elif pd.notna(latest_swing_l_high):
-                self._normal_rebalance(
+                self._calc_submit_orders(
                     asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     total_position=total_position,
@@ -274,70 +292,107 @@ class PairRatioStrategy(BaseSinlyStrategy):
 
 
         if bar.bar_type == self.bar_ratio_s and (pre_swing_l_low or pre_swing_l_high):
-        # TODO, should we check if the swing_l_low and swing_l_high exist at the same time?
-            bar_ratio_s_h = latest_row['bar_ratio_s_h']
-            bar_ratio_s_l = latest_row['bar_ratio_s_l']
+            self._bos_allocation(
+                latest_row=latest_row,
+                pre_swing_l_low=pre_swing_l_low,
+                pre_swing_l_high=pre_swing_l_high,
+                pre_swing_l_ts=pre_swing_l_ts,
+                inst_a=inst_a, price_a=price_a, qty_a=qty_a,
+                inst_b=inst_b, price_b=price_b, qty_b=qty_b,
+                total_position=total_position
+            )
 
-            if pd.notna(pre_swing_l_low) and bar_ratio_s_l < pre_swing_l_low:
+        if bar.bar_type == self.bar_ratio_l and not self.df_history.empty:
+            self._normal_allocation(
+                latest_swing_l_low=latest_row['swing_l_low'],
+                latest_swing_l_high=latest_row['swing_l_high'],
+                swing_l_history=swing_l_history,
+                pre_swing_l_low=pre_swing_l_low,
+                pre_swing_l_high=pre_swing_l_high,
+                inst_a=inst_a, price_a=price_a, qty_a=qty_a,
+                inst_b=inst_b, price_b=price_b, qty_b=qty_b,
+                total_position=total_position
+            )
+
+    def _bos_allocation(self, latest_row, pre_swing_l_low, pre_swing_l_high, pre_swing_l_ts,
+                        inst_a, price_a, qty_a,
+                        inst_b, price_b, qty_b,
+                        total_position):
+        # TODO, should we check if the swing_l_low and swing_l_high exist at the same time?
+        bar_ratio_s_h = latest_row['bar_ratio_s_h']
+        bar_ratio_s_l = latest_row['bar_ratio_s_l']
+
+        if pd.notna(pre_swing_l_low) and bar_ratio_s_l < pre_swing_l_low:
+            # Check duplication
+            if self.last_acted_breakout != (pre_swing_l_ts, 'low'):
                 self.log.info(f"Signal: Short Swing Low Breakout detected.")
-            # So, we need to sell asset A and buy asset B
-                self._normal_rebalance(
+                # So, we need to sell asset A and buy asset B
+                self._calc_submit_orders(
                     asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold
+                    ratio_threshold=self.thresh_hold,
+                    allocation_type="BOS"
                 )
+                self.last_acted_breakout = (pre_swing_l_ts, 'low')
 
-            elif pd.notna(pre_swing_l_high) and bar_ratio_s_h > pre_swing_l_high:
+        elif pd.notna(pre_swing_l_high) and bar_ratio_s_h > pre_swing_l_high:
+            # Check duplication
+            if self.last_acted_breakout != (pre_swing_l_ts, 'high'):
                 self.log.info(f"Signal: Short Swing High Breakout detected.")
-            # So, we need to sell asset B and buy asset A
-                self._normal_rebalance(
+                # So, we need to sell asset B and buy asset A
+                self._calc_submit_orders(
                     asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
                     asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
                     total_position=total_position,
                     ratio_h=self.ratio_h,
-                    ratio_threshold=self.thresh_hold
+                    ratio_threshold=self.thresh_hold,
+                    allocation_type="BOS"
                 )
+                self.last_acted_breakout = (pre_swing_l_ts, 'high')
 
-        if bar.bar_type == self.bar_ratio_l and not self.df_history.empty:
-            # access position: self.cache.positions(instrument_id=self.bar_a_s.instrument_id)
-            latest_swing_l_high = latest_row['swing_l_high']
-            latest_swing_l_low = latest_row['swing_l_low']
+    def _normal_allocation(self, latest_swing_l_low, latest_swing_l_high, swing_l_history,
+                           pre_swing_l_low, pre_swing_l_high,
+                           inst_a, price_a, qty_a,
+                           inst_b, price_b, qty_b,
+                           total_position):
+        if pd.isna(latest_swing_l_low) and pd.isna(latest_swing_l_high):
+            return
 
-            if pd.isna(latest_swing_l_low) and pd.isna(latest_swing_l_high):
-                return
+        if pd.notna(latest_swing_l_low) and not swing_l_history.empty:
+            # if pd.notna(pre_swing_l_high):
+            self._calc_submit_orders(
+                asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
+                asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
+                total_position=total_position,
+                ratio_h=self.ratio_h,
+                ratio_threshold=self.thresh_hold,
+                allocation_type="Normal"
+            )
+            # elif pre_swing_l_low:
+            #     self.log.info(f"Signal: Long Swing Low Breakout detected.")
+        elif pd.notna(latest_swing_l_high) and not swing_l_history.empty:
+            # if pd.notna(pre_swing_l_low):
+            self._calc_submit_orders(
+                asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
+                asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
+                total_position=total_position,
+                ratio_h=self.ratio_h,
+                ratio_threshold=self.thresh_hold,
+                allocation_type="Normal"
+            )
+            # elif pre_swing_l_high:
+            #     self.log.info(f"Signal: Long Swing High Breakout detected.")
 
-            if pd.notna(latest_swing_l_low) and not swing_l_history.empty:
-                if pd.notna(pre_swing_l_high):
-                    self._normal_rebalance(
-                        asset_h={'id': inst_a, 'price': price_a, 'qty': qty_a},
-                        asset_l={'id': inst_b, 'price': price_b, 'qty': qty_b},
-                        total_position=total_position,
-                        ratio_h=self.ratio_h,
-                        ratio_threshold=self.thresh_hold
-                    )
-                elif pre_swing_l_low:
-                    self.log.info(f"Signal: Long Swing Low Breakout detected.")
-            elif pd.notna(latest_swing_l_high) and not swing_l_history.empty:
-                if pd.notna(pre_swing_l_low):
-                    self._normal_rebalance(
-                        asset_h={'id': inst_b, 'price': price_b, 'qty': qty_b},
-                        asset_l={'id': inst_a, 'price': price_a, 'qty': qty_a},
-                        total_position=total_position,
-                        ratio_h=self.ratio_h,
-                        ratio_threshold=self.thresh_hold
-                    )
-                elif pre_swing_l_high:
-                    self.log.info(f"Signal: Long Swing High Breakout detected.")
-
-    def _normal_rebalance(self,
-                          asset_h: dict,
-                          asset_l: dict,
-                          total_position: float,
-                          ratio_h: float,
-                          ratio_threshold: float,
-                          ) -> None:
+    def _calc_submit_orders(self,
+                            asset_h: dict,
+                            asset_l: dict,
+                            total_position: float,
+                            ratio_h: float,
+                            ratio_threshold: float,
+                            allocation_type: str = "Normal"
+                            ) -> None:
         """
         Rebalances the pair to match the target ratio.
 
@@ -349,7 +404,11 @@ class PairRatioStrategy(BaseSinlyStrategy):
             total_position (float): Total equity value (cash + positions).
             ratio_h (float): Target allocation ratio for asset_h (e.g. 0.8).
             ratio_threshold (float): Minimum deviation required to trigger rebalance.
+            allocation_type (str): "BOS" or "Normal" to indicate rebalance reason.
         """
+        # Set allocation type for record_fill
+        self.current_allocation_type = allocation_type
+
         # Unpack
         inst_id_buy = asset_h['id']
         cur_price_buy = asset_h['price']
@@ -449,10 +508,20 @@ class PairRatioStrategy(BaseSinlyStrategy):
         # Use self.log instead of print to ensure it appears in the engine's output
         self.log.info("Strategy stopping...")
 
+        # Ensure the output directory exists
+        if not self.output_path.exists():
+            try:
+                self.output_path.mkdir(parents=True, exist_ok=True)
+                self.log.info(f"Created output directory: {self.output_path}")
+            except Exception as e:
+                self.log.error(f"Could not create output directory {self.output_path}: {e}")
+                return
+
         if not self.df_history.empty:
-            # Save to CSV for full inspection
-            file_path = "strategy_history.csv"
-            self.df_history.to_csv(file_path)
+            # Filename with timestamp tail
+            file_name = f"strategy_history_{self.run_id}.xlsx"
+            file_path = self.output_path / file_name
+            self.df_history.to_excel(file_path)
             self.log.info(f"History saved to {file_path}")
 
             # If you must print to log, convert to string first, but it can be very long
@@ -462,55 +531,139 @@ class PairRatioStrategy(BaseSinlyStrategy):
 
         # Save Fills/Trade History
         if not self.fills_df.empty:
-            fills_path = "fills_history.csv"
-            self.fills_df.to_csv(fills_path)
+            file_name = f"fills_history_{self.run_id}.xlsx"
+            fills_path = self.output_path / file_name
+            # Sort by date before saving
+            df_to_save = self.fills_df.sort_values('date')
+            df_to_save.to_excel(fills_path, index=False)
             self.log.info(f"Fills History saved to {fills_path}")
-            self.log.info(f"Fills Info:\n{self.fills_df}")
+            self.log.info(f"Fills Info:\n{df_to_save}")
         else:
             self.log.info("No fills recorded.")
+
+    def record_fill(self, event: OrderFilled):
+        """
+        Overrides BaseSinlyStrategy.record_fill to aggregate fills by date (daily rebalancing logic).
+        Structure: One row per day with columns for both instruments A and B.
+        """
+        # 1. Identify context
+        ts = pd.Timestamp(event.ts_event, unit='ns')
+        date_key = ts.strftime('%Y-%m-%d')
+        inst_a_id = self.bar_a_s.instrument_id
+        inst_b_id = self.bar_b_s.instrument_id
+
+        # 2. Get or Initialize Daily Record
+        if date_key not in self.daily_fills_log:
+            # Calculate Previous Total Position
+            prev_total_p = 0.0
+            if self.daily_fills_log:
+                # Use O(1) access to last inserted key (Python 3.7+ dicts preserve insertion order)
+                last_key = next(reversed(self.daily_fills_log))
+                prev_total_p = self.daily_fills_log[last_key]['total_position']
+
+            self.daily_fills_log[date_key] = {
+                'date': date_key,
+                'allocation_type': self.current_allocation_type,
+                # Instrument A cols
+                'instrument_a': inst_a_id.value,
+                'order_side_a': None,
+                'fill_qty_a': 0.0,
+                'fill_price_a': 0.0,
+                'fill_value_a': 0.0,
+                # Instrument B cols
+                'instrument_b': inst_b_id.value,
+                'order_side_b': None,
+                'fill_qty_b': 0.0,
+                'fill_price_b': 0.0,
+                'fill_value_b': 0.0,
+                # Portfolio State (End of Day/Event)
+                'position_a': 0.0,
+                'position_b': 0.0,
+                'available_cash': 0.0,
+                'total_position': 0.0,
+                'pos_change': 0.0,  # Percentage change from previous row
+                '_prev_total_p': prev_total_p  # Hidden field for calculation
+            }
+
+        record = self.daily_fills_log[date_key]
+
+        # 3. Aggregating Fill Details
+        fill_qty = event.last_qty.as_double()
+        fill_px = event.last_px.as_double()
+        fill_val = fill_qty * fill_px
+        side = ''
+        if event.order_side == OrderSide.BUY:
+            side = 'B'
+        elif event.order_side == OrderSide.SELL:
+            side = 'S'
+
+        if event.instrument_id == inst_a_id:
+            record['order_side_a'] = side # Assumes same side for all fills in the day
+            record['fill_qty_a'] = round(record['fill_qty_a'] + fill_qty, 2)
+            record['fill_value_a'] = round(record['fill_value_a'] + fill_val, 2)
+            # Calculate Avg Price if multiple fills
+            if record['fill_qty_a'] > 0:
+                record['fill_price_a'] = round(record['fill_value_a'] / record['fill_qty_a'], 2)
+
+        elif event.instrument_id == inst_b_id:
+            record['order_side_b'] = side
+            record['fill_qty_b'] = round(record['fill_qty_b'] + fill_qty, 2)
+            record['fill_value_b'] = round(record['fill_value_b'] + fill_val, 2)
+            # Calculate Avg Price
+            if record['fill_qty_b'] > 0:
+                record['fill_price_b'] = round(record['fill_value_b'] / record['fill_qty_b'], 2)
+
+        # 4. Update Portfolio State Snapshot (Reflects state after *this* fill)
+        #    Since we update this on every fill, the final record for the day will be the final state.
+
+        # Current Quantities
+        qty_a = self.get_quote_qty(inst_a_id)
+        qty_b = self.get_quote_qty(inst_b_id)
+
+        # Cached Daily Prices (using daily close prices as requested)
+        px_a = self.cache_a_s['c'] if self.cache_a_s['c'] is not None else 0.0
+        px_b = self.cache_b_s['c'] if self.cache_b_s['c'] is not None else 0.0
+
+        # Available Cash
+        cash = self.get_available_cash(self.venue)
+
+        # Total Equity Calculation
+        val_a = qty_a * px_a
+        val_b = qty_b * px_b
+        total_p = cash + val_a + val_b
+
+        record['position_a'] = round(qty_a, 2)
+        record['position_b'] = round(qty_b, 2)
+        record['available_cash'] = round(cash, 2)
+        record['total_position'] = round(total_p, 2)
+
+        # Calculate Position Change %
+        prev_p = record.get('_prev_total_p', 0.0)
+        if prev_p and prev_p != 0:
+            # Change relative to previous day's total position
+            change_pct = ((total_p - prev_p) / prev_p) * 100.0
+            record['pos_change'] = round(change_pct, 2)
+        else:
+            record['pos_change'] = 0.0
+
+    @property
+    def fills_df(self) -> pd.DataFrame:
+        """
+        Returns the daily aggregated fills history as a pandas DataFrame.
+        """
+        df = pd.DataFrame(list(self.daily_fills_log.values()))
+        # Remove helper columns if present
+        if not df.empty and '_prev_total_p' in df.columns:
+            df = df.drop(columns=['_prev_total_p'])
+        return df
 
 
     def on_order_filled(self, event: OrderFilled) -> None:
         """
         Triggered immediately when an order is partially or fully filled.
         """
-        # 1. Record the execution details to internal history
+        # 1. Record the execution details (Aggregated Daily Log)
         self.record_fill(event)
-
-        # 1.5. Enrich the history record with Total Equity (position_all)
-        #      Using cached close prices from the strategy state
-        #      NOTE: These prices are technically from the LAST RECEIVED BAR, not live ticks.
-        #            For daily bars backtest, this is acceptable.
-        if self.fills_history:
-            inst_a = self.bar_a_s.instrument_id
-            inst_b = self.bar_b_s.instrument_id
-
-            # Current quantities
-            qty_a = self.get_quote_qty(inst_a)
-            qty_b = self.get_quote_qty(inst_b)
-
-            # Cached Prices
-            px_a = self.cache_a_s['c'] or 0.0
-            px_b = self.cache_b_s['c'] or 0.0
-
-            # If the current fill is for A or B, update the price to reflect the fill price approx?
-            # Or just stick to the bar close? User asked to use daily close info stored.
-            # We'll use the cached daily close logic as requested.
-
-            # Cash (already fetched in record_fill, but let's grab it or reuse)
-            # Accessing the last record created by record_fill
-            last_record = self.fills_history[-1]
-            cash = last_record['available_cash']
-
-            # Calculate Equity
-            val_a = qty_a * px_a
-            val_b = qty_b * px_b
-            position_all = cash + val_a + val_b
-
-            # Update the record
-            self.fills_history[-1]['position_all'] = position_all
-            self.fills_history[-1]['price_a'] = px_a
-            self.fills_history[-1]['price_b'] = px_b
 
         # 2. Strategy Specific Logic: Chain Execution (Deferred Buy)
         if self.pending_buy_instruction and event.order_side == OrderSide.SELL:
