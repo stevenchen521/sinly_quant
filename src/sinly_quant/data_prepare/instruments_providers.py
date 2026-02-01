@@ -617,7 +617,7 @@ class InstrumentProvider:
             currency=USD,
             price_precision=4,
             price_increment=Price.from_str("0.0001"),
-            lot_size=Quantity.from_int(1),
+            lot_size=Quantity.from_str("1"),
             # isin="US0378331005",
             ts_event=0,
             ts_init=0,

@@ -32,26 +32,29 @@ def run_backtest():
     # 1. Load Data
     catalog = ParquetDataCatalog(CATALOG_PATH)
 
+    start_date = "2008-01-01T00:00:00Z"
+    end_date = "2024-12-31T00:00:00Z"
+
     print("Loading data from catalog...")
     bars_gld = catalog.query(
         data_cls=Bar,
         identifiers=[f"{symbol_name_gld}.{venue_name_abc}"],
-        start="2008-01-01T00:00:00Z",
-        end="2024-12-31T00:00:00Z",
+        start=start_date,
+        end=end_date,
     )
 
     bars_vti = catalog.query(
         data_cls=Bar,
         identifiers=[f"{symbol_name_vti}.{venue_name_abc}"],
-        start="2008-01-01T00:00:00Z",
-        end="2024-12-31T00:00:00Z",
+        start=start_date,
+        end=end_date,
     )
 
     bars_vti_gld = catalog.query(
         data_cls=Bar,
         identifiers=[f"{symbol_name_vti_gld}.{venue_name_abc}"],
-        start="2008-01-01T00:00:00Z",
-        end="2024-12-31T00:00:00Z",
+        start=start_date,
+        end=end_date,
     )
 
     # Filter bars by timeframe
@@ -84,8 +87,8 @@ def run_backtest():
     engine.add_venue(
         venue=Venue(venue_name_abc),
         oms_type=OmsType.NETTING,
-        account_type=AccountType.MARGIN,
-        starting_balances=[Money(1_000_000, USD)],
+        account_type=AccountType.CASH,
+        starting_balances=[Money(10_000, USD)],
         base_currency=USD,
         default_leverage=Decimal(1),
     )
